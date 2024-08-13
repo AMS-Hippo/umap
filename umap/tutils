@@ -1,0 +1,109 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import torch.onnx
+import torchvision
+
+# Copies a parametric UMAP network to a pytorch one. Also exports an .onnx object.
+
+# WARNING: At the moment I'm hard-coding the PUMAP network in (1). This is obviously not a good idea long-term, but at the moment you can't tweak the network in parametric UMAP.
+
+##################################################
+# 1. Pytorch version of parametric UMAP network. #
+##################################################
+
+class PumapNet(nn.Module):
+    def __init__(self,indim,outdim):
+        super(PumapNet, self).__init__()
+        self.dense1 = nn.Linear(indim,100)
+        self.dense2 = nn.Linear(100,100)
+        self.dense3 = nn.Linear(100,100)
+        self.dense4 = nn.Linear(100,outdim)
+
+        """
+        Creates the same network as the one used by parametric UMAP.
+
+        Parameters
+        ----------
+        indim : int
+            dimension of input to network.
+        outdim : int
+            dimension of output of network.
+        """
+
+    def forward(self, x):
+        x = self.dense1(x)
+        x = F.relu(x)
+        x = self.dense2(x)
+        x = F.relu(x)
+        x = self.dense3(x)
+        x = F.relu(x)
+        x = self.dense4(x)
+        x = F.relu(x)
+        return x
+
+######################
+# 2. Copying weights #
+######################
+
+def pumap_copier(km,pm):
+    """ Copies weights from a parametric UMAP encoder to pytorch.
+    Parameters
+    ----------
+    km : encoder extracted from parametric UMAP.
+    pm: a PumapNet object. Will be overwritten.
+    Returns
+    -------
+    pm : PumapNet Object.
+        Net with copied weights.
+    """
+    kweights = km.get_weights()
+    n_layers = int(len(kweights)/2) # The actual number of layers
+
+    # Get the names of the pytorch layers
+    all_keys = [x for x in pm.state_dict().keys()]
+    pm_names = [all_keys[2*i].split(".")[0] for i in range(4)]
+
+    # Set a variable for the state dict
+    pyt_state_dict = pm.state_dict()
+
+    for i in range(n_layers): # Set weights and biases in the dict.
+        pyt_state_dict[pm_names[i] + ".bias"] = kweights[2*i + 1]
+        pyt_state_dict[pm_names[i] + ".weight"] = np.transpose(kweights[2*i])
+
+    for key in pyt_state_dict.keys():
+        pyt_state_dict[key] = torch.from_numpy(pyt_state_dict[key])
+
+    # Update
+    pm.load_state_dict(pyt_state_dict)
+    return pm
+
+##############
+# 3. to_ONNX #
+##############
+
+def to_ONNX(trained_PUMAP,input_dim = 384, target_dim = 2, name = "Parametric UMAP.onnx"):
+    """ Exports trained parametric UMAP as ONNX.
+    Parameters
+    ----------
+    trained_PUMAP: a fitted parametric UMAP object
+    input_dim : int
+        dimension of input to network.
+    target_dim : int
+        dimension of output of network.
+    name: str
+        Name that onnx file will be saved as.
+
+    """
+    # Extract encoder
+    km = trained_PUMAP.encoder
+    # Extract weights
+    pm = PumapNet(input_dim,target_dim)
+    pm = pumap_copier(km,pm)
+    
+    # Do the ONNX stuff
+    dummy_input = torch.randn(1, input_dim)
+    # model = pm.to(device) # I don't think we need this.
+    # Invoke export
+    return torch.onnx.export(pm, dummy_input, name)
